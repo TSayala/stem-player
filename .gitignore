@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.spec
+*.manifest
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+CLAUDE.md
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# PyInstaller
+*.exe
+
+# StemDJ cache (Opus-encoded stems)
+.stemdj/
+
+# Temporary files
+*.tmp
+*.bak
