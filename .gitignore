@@ -22,6 +22,7 @@ env/
 *.swo
 *~
 CLAUDE.md
+.claude/
 
 # OS
 Thumbs.db

@@ -1,7 +1,10 @@
+# Install CUDA-enabled PyTorch wheels (compatible with CUDA 13.x drivers)
+--extra-index-url https://download.pytorch.org/whl/cu128
+
 # Stem separation
+torch
+torchaudio
 demucs>=4.0.1
-torch>=2.0.0
-torchaudio>=2.0.0
 
 # Audio I/O and processing
 sounddevice>=0.4.6
@@ -14,5 +17,5 @@ pyrubberband>=0.3.0
 # UI
 PySide6>=6.6.0
 
-# Packaging
+# Packaging (optional — only needed for building .exe)
 pyinstaller>=6.0.0
