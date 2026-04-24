@@ -9,7 +9,18 @@ from PySide6.QtWidgets import (
     QPushButton, QFrame,
 )
 
-from config import STEM_COLORS
+from config import STEM_COLORS, STEM_NAMES
+
+
+# Canonical display order. Anything not in this list falls to the end.
+STEM_DISPLAY_ORDER = list(STEM_NAMES)  # ("lead_vocals", "back_vocals", "drums", "bass", "guitar", "piano", "other")
+
+
+def order_stems(names) -> list[str]:
+    """Return stem names sorted by canonical display order."""
+    ordered = [n for n in STEM_DISPLAY_ORDER if n in names]
+    extras = [n for n in names if n not in STEM_DISPLAY_ORDER]
+    return ordered + extras
 
 
 class EQDial(QSlider):
@@ -103,7 +114,20 @@ class StemChannelStrip(QFrame):
         self.mute_btn.setFixedSize(30, 24)
         self.mute_btn.setToolTip("Mute")
         self.mute_btn.setStyleSheet("""
-            QPushButton:checked { background: #E06C75; color: #fff; border: none; border-radius: 4px; }
+            QPushButton {
+                background: #2C313A;
+                color: #ABB2BF;
+                border: 1px solid #3E4451;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover { background: #3E4451; }
+            QPushButton:checked {
+                background: #E06C75;
+                color: #fff;
+                border: 1px solid #E06C75;
+            }
         """)
         self.mute_btn.toggled.connect(lambda v: self.mute_changed.emit(self.stem_name, v))
 
@@ -112,7 +136,20 @@ class StemChannelStrip(QFrame):
         self.solo_btn.setFixedSize(30, 24)
         self.solo_btn.setToolTip("Solo")
         self.solo_btn.setStyleSheet("""
-            QPushButton:checked { background: #E5C07B; color: #1B1D23; border: none; border-radius: 4px; }
+            QPushButton {
+                background: #2C313A;
+                color: #ABB2BF;
+                border: 1px solid #3E4451;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover { background: #3E4451; }
+            QPushButton:checked {
+                background: #E5C07B;
+                color: #1B1D23;
+                border: 1px solid #E5C07B;
+            }
         """)
         self.solo_btn.toggled.connect(lambda v: self.solo_changed.emit(self.stem_name, v))
 
@@ -149,14 +186,16 @@ class StemMixer(QWidget):
         self._strips: dict[str, StemChannelStrip] = {}
 
     def set_stems(self, stem_names: list[str]):
-        """Rebuild channel strips for the given stem names."""
+        """Rebuild channel strips for the given stem names, in canonical order."""
         # Clear existing
-        for s in self._strips.values():
-            self._layout.removeWidget(s)
-            s.deleteLater()
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
         self._strips.clear()
 
-        for name in stem_names:
+        for name in order_stems(stem_names):
             strip = StemChannelStrip(name)
             strip.volume_changed.connect(self.volume_changed)
             strip.mute_changed.connect(self.mute_changed)
