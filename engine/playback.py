@@ -79,6 +79,10 @@ class PlaybackEngine:
         # Processed stems cache (after tempo/pitch transform)
         self._processed_stems: dict[str, np.ndarray] = {}
         self._transform_dirty: bool = False
+        self._rebuild_lock = threading.Lock()  # serialises rebuild calls
+
+        # Loop
+        self._loop: bool = False
 
         # EQ filter coefficients (computed once per sample rate)
         self._eq_sos = _make_eq_filters(config.sample_rate)
@@ -210,44 +214,91 @@ class PlaybackEngine:
             self._pitch_semitones = semitones
             self._transform_dirty = True
 
+    def set_loop(self, enabled: bool):
+        self._loop = bool(enabled)
+
+    @property
+    def is_playing(self) -> bool:
+        return self._playing
+
+    @property
+    def loop(self) -> bool:
+        return self._loop
+
     def _rebuild_if_dirty(self):
-        """Re-process stems through rubberband when tempo/pitch changes."""
-        if not self._transform_dirty:
-            return
-        if self._tempo_ratio == 1.0 and self._pitch_semitones == 0.0:
-            self._processed_stems = dict(self._stems)
-            self._transform_dirty = False
-            return
+        """Re-process stems through rubberband when tempo/pitch changes.
 
+        Safe to call from any thread. Serialised by ``_rebuild_lock`` so
+        callers cannot overlap heavy rubberband work, which would thrash
+        temp files and CPU.
+        """
+        # Non-blocking acquire: if another thread is already rebuilding,
+        # bail. The caller will have set _transform_dirty so the active
+        # worker will see the latest state and the next call will redo.
+        if not self._rebuild_lock.acquire(blocking=False):
+            return
         try:
-            import pyrubberband as pyrb
-        except ImportError:
-            # Fallback: skip time/pitch stretching
-            self._processed_stems = dict(self._stems)
-            self._transform_dirty = False
-            return
+            if not self._transform_dirty or not self._stems:
+                return
 
-        new_stems: dict[str, np.ndarray] = {}
-        for name, audio in self._stems.items():
-            # pyrubberband expects [samples, channels]
-            stretched = pyrb.time_stretch(audio.T, self._sr, self._tempo_ratio)
-            if self._pitch_semitones != 0.0:
-                stretched = pyrb.pitch_shift(stretched, self._sr, self._pitch_semitones)
-            new_stems[name] = stretched.T.astype(np.float32)
+            tempo = self._tempo_ratio
+            pitch = self._pitch_semitones
 
-        # Align lengths after stretching
-        max_len = max(s.shape[-1] for s in new_stems.values()) if new_stems else 0
-        for name in new_stems:
-            s = new_stems[name]
-            if s.shape[-1] < max_len:
-                new_stems[name] = np.pad(s, ((0, 0), (0, max_len - s.shape[-1])))
+            if tempo == 1.0 and pitch == 0.0:
+                with self._lock:
+                    self._processed_stems = dict(self._stems)
+                    self._total_samples = max(s.shape[-1] for s in self._stems.values())
+                    self._pos = min(self._pos, self._total_samples)
+                self._transform_dirty = False
+                return
 
-        with self._lock:
-            self._processed_stems = new_stems
-            self._total_samples = max_len
-            # Clamp position
-            self._pos = min(self._pos, self._total_samples)
-        self._transform_dirty = False
+            try:
+                import pyrubberband as pyrb
+            except ImportError:
+                # Fallback: no time/pitch shift available
+                with self._lock:
+                    self._processed_stems = dict(self._stems)
+                    self._total_samples = max(s.shape[-1] for s in self._stems.values())
+                    self._pos = min(self._pos, self._total_samples)
+                self._transform_dirty = False
+                return
+
+            new_stems: dict[str, np.ndarray] = {}
+            try:
+                for name, audio in self._stems.items():
+                    # pyrubberband expects [samples, channels]
+                    stretched = pyrb.time_stretch(audio.T, self._sr, tempo)
+                    if pitch != 0.0:
+                        stretched = pyrb.pitch_shift(stretched, self._sr, pitch)
+                    new_stems[name] = stretched.T.astype(np.float32)
+            except Exception:
+                # Any failure (missing rubberband CLI, subprocess error, …)
+                # — fall back to the untransformed stems so playback keeps
+                # working instead of crashing the app.
+                with self._lock:
+                    self._processed_stems = dict(self._stems)
+                    self._total_samples = max(s.shape[-1] for s in self._stems.values())
+                    self._pos = min(self._pos, self._total_samples)
+                self._transform_dirty = False
+                return
+
+            max_len = max(s.shape[-1] for s in new_stems.values()) if new_stems else 0
+            for name in new_stems:
+                s = new_stems[name]
+                if s.shape[-1] < max_len:
+                    new_stems[name] = np.pad(s, ((0, 0), (0, max_len - s.shape[-1])))
+
+            with self._lock:
+                self._processed_stems = new_stems
+                self._total_samples = max_len
+                self._pos = min(self._pos, self._total_samples)
+            # Only clear dirty if tempo/pitch haven't changed since we
+            # snapshotted them. Otherwise a newer change arrived mid-rebuild
+            # and the next call should run again.
+            if tempo == self._tempo_ratio and pitch == self._pitch_semitones:
+                self._transform_dirty = False
+        finally:
+            self._rebuild_lock.release()
 
     # ------------------------------------------------------------------
     # audio callback (runs on audio thread)
@@ -259,6 +310,16 @@ class PlaybackEngine:
             return
 
         pos = self._pos
+        # If we've reached the end, either loop or stop
+        if pos >= self._total_samples:
+            if self._loop and self._total_samples > 0:
+                pos = 0
+                self._pos = 0
+            else:
+                outdata[:] = 0
+                self._playing = False
+                return
+
         end = min(pos + frames, self._total_samples)
         n = end - pos
 

@@ -1,8 +1,8 @@
-"""Transport bar: play/pause, seek slider, time, tempo, pitch."""
+"""Transport bar: play/pause, seek slider, time, tempo, pitch, loop."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QSlider,
     QLabel, QFrame,
@@ -15,19 +15,36 @@ def _fmt_time(seconds: float) -> str:
 
 
 class TransportBar(QFrame):
-    """Play/pause button, seek slider, time display, tempo & pitch knobs."""
+    """Play/pause button, seek slider, time display, tempo & pitch knobs, loop."""
 
     play_toggled = Signal()
     stop_clicked = Signal()
     seek_requested = Signal(float)     # seconds
     tempo_changed = Signal(float)      # ratio
     pitch_changed = Signal(float)      # semitones
+    loop_toggled = Signal(bool)
+
+    # Debounce window for the expensive tempo/pitch rebuild. The label
+    # still updates live on every value change, so users see instant
+    # feedback while we coalesce rubberband work.
+    _DEBOUNCE_MS = 250
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.NoFrame)
         self.setStyleSheet("background: #1B1D23; border-radius: 8px; padding: 4px;")
         self._duration: float = 0.0
+
+        self._tempo_timer = QTimer(self)
+        self._tempo_timer.setSingleShot(True)
+        self._tempo_timer.setInterval(self._DEBOUNCE_MS)
+        self._tempo_timer.timeout.connect(self._emit_tempo)
+
+        self._pitch_timer = QTimer(self)
+        self._pitch_timer.setSingleShot(True)
+        self._pitch_timer.setInterval(self._DEBOUNCE_MS)
+        self._pitch_timer.timeout.connect(self._emit_pitch)
+
         self._build()
 
     def _build(self):
@@ -59,11 +76,11 @@ class TransportBar(QFrame):
         seek_row.addWidget(self.duration_label)
         outer.addLayout(seek_row)
 
-        # ── row 2: transport + tempo/pitch ────────────────
+        # ── row 2: transport + tempo/pitch + loop ──────────
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(12)
 
-        # Play / Stop
+        # Play / Stop / Loop
         self.play_btn = QPushButton("▶")
         self.play_btn.setFixedSize(44, 36)
         self.play_btn.setStyleSheet("font-size: 18px; border-radius: 18px;")
@@ -74,9 +91,20 @@ class TransportBar(QFrame):
         self.stop_btn.setStyleSheet("font-size: 16px; border-radius: 18px;")
         self.stop_btn.clicked.connect(self.stop_clicked)
 
+        self.loop_btn = QPushButton("↻")
+        self.loop_btn.setFixedSize(36, 36)
+        self.loop_btn.setCheckable(True)
+        self.loop_btn.setToolTip("Loop track")
+        self.loop_btn.setStyleSheet("""
+            QPushButton { font-size: 18px; border-radius: 18px; }
+            QPushButton:checked { background: #98C379; color: #1B1D23; }
+        """)
+        self.loop_btn.toggled.connect(self.loop_toggled)
+
         ctrl_row.addStretch()
         ctrl_row.addWidget(self.stop_btn)
         ctrl_row.addWidget(self.play_btn)
+        ctrl_row.addWidget(self.loop_btn)
         ctrl_row.addStretch()
 
         # Tempo control
@@ -90,7 +118,7 @@ class TransportBar(QFrame):
         self.tempo_slider.setRange(50, 200)  # percent
         self.tempo_slider.setValue(100)
         self.tempo_slider.setFixedWidth(120)
-        self.tempo_slider.valueChanged.connect(self._on_tempo)
+        self.tempo_slider.valueChanged.connect(self._on_tempo_value)
         self.tempo_label = QLabel("100%")
         self.tempo_label.setAlignment(Qt.AlignCenter)
         self.tempo_label.setStyleSheet("font-size: 11px;")
@@ -113,7 +141,7 @@ class TransportBar(QFrame):
         self.pitch_slider.setRange(-120, 120)  # tenths of semitone
         self.pitch_slider.setValue(0)
         self.pitch_slider.setFixedWidth(120)
-        self.pitch_slider.valueChanged.connect(self._on_pitch)
+        self.pitch_slider.valueChanged.connect(self._on_pitch_value)
         self.pitch_label = QLabel("0 st")
         self.pitch_label.setAlignment(Qt.AlignCenter)
         self.pitch_label.setStyleSheet("font-size: 11px;")
@@ -150,6 +178,11 @@ class TransportBar(QFrame):
     def set_playing(self, playing: bool):
         self.play_btn.setText("⏸" if playing else "▶")
 
+    def set_loop(self, enabled: bool):
+        self.loop_btn.blockSignals(True)
+        self.loop_btn.setChecked(enabled)
+        self.loop_btn.blockSignals(False)
+
     # ── handlers ──────────────────────────────────────────
 
     def _on_seek(self):
@@ -161,11 +194,17 @@ class TransportBar(QFrame):
         if self._duration > 0:
             self.time_label.setText(_fmt_time(val / 10000 * self._duration))
 
-    def _on_tempo(self, val: int):
+    def _on_tempo_value(self, val: int):
         self.tempo_label.setText(f"{val}%")
-        self.tempo_changed.emit(val / 100.0)
+        self._tempo_timer.start()
 
-    def _on_pitch(self, val: int):
+    def _on_pitch_value(self, val: int):
         st = val / 10.0
         self.pitch_label.setText(f"{st:+.1f} st")
-        self.pitch_changed.emit(st)
+        self._pitch_timer.start()
+
+    def _emit_tempo(self):
+        self.tempo_changed.emit(self.tempo_slider.value() / 100.0)
+
+    def _emit_pitch(self):
+        self.pitch_changed.emit(self.pitch_slider.value() / 10.0)
